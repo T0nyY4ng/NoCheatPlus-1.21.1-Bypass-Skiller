@@ -1,0 +1,399 @@
+/*
+ * This program is free software: you can redistribute it and/or modify
+ *   it under the terms of the GNU General Public License as published by
+ *   the Free Software Foundation, either version 3 of the License, or
+ *   (at your option) any later version.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *   You should have received a copy of the GNU General Public License
+ *   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+package fr.neatmonster.nocheatplus.checks.moving.model;
+
+import java.util.LinkedList;
+import java.util.List;
+
+import org.bukkit.entity.LivingEntity;
+import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.util.Vector;
+
+import fr.neatmonster.nocheatplus.checks.moving.player.HiddenMotionReconstructor;
+import fr.neatmonster.nocheatplus.checks.moving.velocity.SimpleEntry;
+import fr.neatmonster.nocheatplus.compat.AlmostBoolean;
+
+/**
+ * Include player-specific data for a move.
+ * 
+ * @author asofold
+ *
+ */
+public class PlayerMoveData extends MoveData {
+
+    //////////////////////////////////////////////////////////
+    // Reset with set, could be lazily set during checking.
+    //////////////////////////////////////////////////////////
+    // Properties of the player.
+    /** Player action set on {@link org.bukkit.event.player.PlayerMoveEvent}. NOTE: this is NOT the toggle glide moment, but the entire gliding phase. */
+    public boolean isGliding;
+    
+    /** Represents how far the player is submerged in lava. Set with {@link fr.neatmonster.nocheatplus.utilities.map.BlockProperties#getVerticalFrictionFactor(LivingEntity, fr.neatmonster.nocheatplus.utilities.location.PlayerLocation)} */
+    public double submergedLavaHeight;
+    
+    /** Represents how far the player is submerged in water. Set with {@link fr.neatmonster.nocheatplus.utilities.map.BlockProperties#getVerticalFrictionFactor(LivingEntity, fr.neatmonster.nocheatplus.utilities.location.PlayerLocation)} */
+    public double submergedWaterHeight;
+    
+    /** A flag to indicate that the player is currenrtly lunging forward due to left clicking with a Spear in hand with Lunge enchantement. Set in CombatListener. */
+    public boolean lungingForward;
+    
+    /**
+     * A flag to handle the riptide effect/logic, particularly when on ground.<p>
+     * When the {@code releaseItem()} method is called, Minecraft checks whether
+     * the player is on ground. If so, the player is not only pushed by the
+     * calculated riptide vector, but is also moved upwards by {@code 1.2} blocks via a
+     * direct call to {@code move()}. This upward movement bypasses the normal physics
+     * pipeline, as no other physics-related methods are invoked ({@code LivingEntity.class}).<p>
+     * 
+     * This translates in a very odd movement on the server-side, as the client-side logic may not execute in a strictly linear order. 
+     * The final result depends on when the code is called relative to the movement update,
+     * whether at the start or at the end of the move tick: <p>
+     * <pre>
+     * Assume a hypothetical riptide velocity of {@code x1 y2 z1}:
+     * if the trident is released at the end of the movement while the player is on
+     * ground, the vertical move of 1.2 is processed first and the riptide push is applied
+     * afterwards. In this case, two separate packets are sent: {@code x0 y1.2 z0} and then {@code x1 y2 z1};
+     * the movement is, in a way, "split" into two distinct updates.
+     *
+     * If the trident is instead released at the start of the movement while the player is
+     * on ground, the code executes normally within a single movement update,
+     * resulting in a single packet of {@code x1 y3.2 z1}.
+     * </pre>
+     * The {@code MAYBE} flag represents the on ground state during riptide,
+     * when that state is handled separately/split, rather than representing the
+     * riptide action itself.
+     * 
+     */
+    public AlmostBoolean tridentRelease;
+    
+    /**
+     * The distance covered by a move from the setback point to the to.getY() point.
+     * Usually, this corresponds to the jump height, because the set back point is set on ground.<br>
+     * This could change in the future with set back policies changes (i.e.: force-fall)
+     */
+    public double setBackYDistance;
+    
+    /**
+     * Indicates that this movement has/should have been slowed down due to the player hitting an entity (sprinting will be reset as well).<br>
+     * Mostly intended to be used for the h-speed prediction.<br>
+     * Set in the {@link fr.neatmonster.nocheatplus.checks.fight.FightListener}
+     */
+    public boolean hasAttackSlowDown;
+
+    /**
+     * Set when {@code maybeBackOffFromEdge} ran this tick (shift + above ground).
+     * Used for sneak-edge corner recovery in SurvivalFly.
+     */
+    public boolean edgeBackoffApplied;
+
+    /**
+     * Set when edge backoff reduced at least one horizontal axis this tick ({@code preEdge != backOff}).
+     */
+    public boolean edgeAxisClamped;
+
+    /**
+     * Set when edge backoff clipped both X and Z on at least one brute candidate (block corner).
+     */
+    public boolean edgeCornerClamp;
+
+    /**
+     * Set when a corner candidate was matched and applied this tick ({@link SurvivalFly}).
+     */
+    public boolean edgeCornerResolved;
+
+    public double motionX;
+    /** Slime: last tick modeled {@code yBC}; chains as seed when packet {@code yDistance == 0} until leaving slime. */
+    public double motionY;
+    public double motionZ;
+
+    // Bounds set by checks.
+    /**
+     * Estimated X distance only. Set in SurvivalFly. Could be overridden multiple times
+     * during processing of moving checks.
+     */
+    public double xAllowedDistance;
+    
+    /**
+     *  The collision on the X axis that has been set in this movement by SurvivalFly.
+     *  Prior to version 1.21.2, this was set only if the theoretical speed prediction to set in this movement was found; or in other words, only if the player isn't cheating.
+     *  On 1.21.2 and above, this is always set 
+     *  @see PlayerMoveData#hasImpulse
+     */ 
+    public boolean collideX;
+
+    /**
+     * Estimated Z distance only. Set in SurvivalFly. Could be overridden multiple times
+     * during processing of moving checks.
+     */
+    public double zAllowedDistance;
+    
+    /**
+     * Index (0..8) into the 9-element WASD candidate arrays used by
+     * {@code SurvivalFly} when client inputs are unknown. The index selects which
+     * WASD candidate (combination of strafe/forward) produced a final
+     * post-collision horizontal displacement that falls below the client's
+     * movement-send suppression threshold (and therefore could have been
+     * "hidden" / not sent by the client).
+     *
+     * <p>Semantics and usage:
+     * <ul>
+     *   <li>Set during the candidate loop in {@code SurvivalFly} whenever a
+     *       candidate's post-collision displacement is below the suppression
+     *       threshold; {@code -1} means "no candidate recorded". If multiple
+     *       candidates match, the last matching index overwrites earlier ones.</li>
+     *   <li>When non-negative, this index is used immediately (in the same
+     *       tick) to seed {@link fr.neatmonster.nocheatplus.checks.moving.player.HiddenMotionReconstructor#findBestHiddenTickExplanation}.
+     *       The reconstructor attempts to explain the observed movement by
+     *       simulating additional hidden ticks and returns cumulative
+     *       displacements which are stored in the "corrected distance" fields
+     *       (e.g. {@code xCorrectedDistancePre/Post}).</li>
+     *   <li>The returned corrected distances are applied either as a starting
+     *       allowed momentum for the following tick ({@code xCorrectedDistancePre})
+     *       or folded into candidate computations for the current tick
+     *       ({@code xCorrectedDistancePost}). A special-case "hdistzero" stores
+     *       post-corrections when the observed move has zero displacement.</li>
+     * </ul>
+     * <p>In short: this field identifies the WASD candidate used as the seed for
+     * hidden-tick reconstruction. It is not the corrected distance itself (the
+     * reconstructor computes that); it only points to which candidate was used.</p>
+     */
+    public int hiddenDistanceIndex;
+    
+    public int hiddenYDistanceIndex;
+    
+    /**
+     * Is there stop motion during/after hidden move happening? <br>
+     * VOLATILE by design and should not be use elsewhere
+     */
+    public boolean possibleStopMotion;
+    
+    /**
+     * Corrected X displacement computed for the previous move by the hidden-tick
+     * reconstructor.
+     *
+     * Used as the starting horizontal momentum on the next tick (replaces the
+     * usual lastMove.xDistance). Set to 0.0 after it is applied or when not
+     * needed.
+     */
+    public double xCorrectedDistancePre;
+
+    /**
+     * Mirror of {@link #xCorrectedDistancePre} for the Y axis.
+     */
+    public double yCorrectedDistancePre;
+    
+    /**
+     * Corrected Z displacement computed for the previous move by the
+     * hidden-tick reconstructor. Applied the same way as
+     * {@link #xCorrectedDistancePre} but for the Z axis.
+     */
+    public double zCorrectedDistancePre;
+    
+    /**
+     * Post-correction X displacement. When a hidden candidate exists but the
+     * observed move has zero displacement (or similar cases), the reconstructor
+     * result can be stored here and added to theoretical candidate distances in
+     * the next calculations. This is a temporary holder and is cleared when
+     * consumed.
+     */
+    public double xCorrectedDistancePost;
+    
+    /**
+     * Post-correction Z displacement. Works like {@link #xCorrectedDistancePost}
+     * but for the Z axis.
+     */
+    public double zCorrectedDistancePost;
+
+    /**
+     *  The collision on the Z axis that has been set in this movement by SurvivalFly.
+     *  Prior to version 1.21.2, this was set only if the theoretical speed prediction to set in this movement was found; or in other words, only if the player isn't cheating.
+     *  On 1.21.2 and above, this is always set.
+     *  @see PlayerMoveData#hasImpulse
+     */
+    public boolean collideZ;
+
+    /**
+     * Combined XZ distance. Set in SurvivalFly.
+     */
+    public double hAllowedDistance;
+
+    /**
+     * Vertical allowed distance estimated by checks. Could be overridden multiple times
+     * during processing of moving checks.
+     */
+    public double yAllowedDistance;
+    
+    /**
+     * The vertical collision as set by {@link fr.neatmonster.nocheatplus.utilities.location.RichEntityLocation#collide(Vector, boolean, double[])} in SurvivalFly (vdistrel).
+     * Note that this does not differentiate collision above VS below: it considers both.
+     */
+    public boolean collideY;
+
+
+    // Properties involving the environment.
+    /** This move was a bunny hop. */
+    public boolean bunnyHop;
+   
+    /** This move was a step-up. Set in SurvivalFLy */
+    public boolean isStepUp;
+
+    /** This move was an actual jump, as intended in its most common sense (jumping from the ground by pressing the space bar). */
+    public boolean isJump;
+    
+    /** Highly uncertain movement: player might step up with this movement; we cannot know for sure. Set with lost-ground couldstep */
+    public boolean couldStepUp;
+
+    /**
+     * Client onGround for this segment (flying packet on packet-split, or {@link org.bukkit.entity.Player#isOnGround()} otherwise).
+     */
+    public boolean hasClientFromOnGround;
+    public boolean clientFromOnGround;
+    public boolean hasClientToOnGround;
+    public boolean clientToOnGround;
+    /**
+     * To-packet horizontal collision (1.21.3+ protocol). Only consumed on the non-brute (WASD-known) path.
+     */
+    public boolean hasClientToHorizontalCollision;
+    public boolean clientToHorizontalCollision;
+
+    // Meta stuff.
+    /**
+     * Represent which skipped move this {@link org.bukkit.event.player.PlayerMoveEvent} was supposed to represent.<br>
+     * Due to the thresholds and other subtleties with the {@link org.bukkit.event.player.PlayerMoveEvent}, there could have been other
+     * (micro-) moves by the player which could not be checked, because Bukkit did not fire an event for them. One moving event
+     * is split into several other moves, with a cap.<br>
+     * 0 = no movements were skipped.
+     */
+    public int multiMoveCount;
+    
+    /**
+     * Mojang introduced a new "mechanic" in 1.17 which allows player to re-send their position on right-clicking.
+     * On Bukkit's side, this translates in a {@link org.bukkit.event.player.PlayerMoveEvent} which doesn't have any movement change: ({@link PlayerMoveEvent#getFrom()} and {@link PlayerMoveEvent#getTo()} contain the same location).<br>
+     * This moving event is skipped from being processed.<br>
+     * Do note that players cannot send duplicate packets in a row: after we receive an "empty" PlayerMoveEvent, the next one incoming must have the actual movement change.
+     * (Sequence is: normal PME -> duplicate PME -> normal PME(...))<br>
+     * Fixed in 1.21.1.
+     */
+    public boolean hasNoMovementDueToDuplicatePacket;
+
+    /**
+     * Just the used vertical velocity. Could be overridden multiple times
+     * during processing of moving checks.
+     */
+    public List<SimpleEntry> verVelUsed = new LinkedList<>();
+    
+    /**
+     * Indicates whether this movement has a horizontal impulse, meaning the player actively pressed a WASD key, to differentiate between player-driven movement and passive movement (e.g., from external forces like push or velocity).
+     * <p>
+     * <b>Prior to version 1.21.2, inputs were not sent to the server, so movement impulse was inferred by replicating client-movement calculations.
+     * This means this boolean's value depended on our prediction:</b>
+     *
+     * <ul>
+     * <li>YES: Active player input was detected through prediction.</li>
+     * <li>MAYBE: We couldn't predict speed, so player input is unclear.</li>
+     * <li>NO: No active player input was detected through prediction.</li>
+     * </ul>
+     *
+     * <p>For clients supporting impulse event-sending, this will only return YES or NO, as input data is always available.</p>
+     */
+    public AlmostBoolean hasImpulse;
+    
+    /**
+     * Indicates the strafing direction (LEFT, RIGHT, or NONE).
+     *
+     * <p>This value is set even if horizontal movement could not be accurately predicted, so it may be unreliable, unless the client sends impulse events, in which case it is dependable.
+     * Check {@link PlayerMoveData#hasImpulse} for its reliability prior to version 1.21.2 </p>
+     */
+    public PlayerKeyboardInput.StrafeDirection strafeImpulse;
+    
+    /**
+     * Indicates the forward movement direction (FORWARD, BACKWARD, or NONE).
+     *
+     * <p>This value is set even if horizontal movement could not be accurately predicted, so it may be unreliable, unless the client sends impulse events, in which case it is dependable.
+     * Check {@link PlayerMoveData#hasImpulse} for its reliability prior to version 1.21.2 </p>
+     */
+    public PlayerKeyboardInput.ForwardDirection forwardImpulse;
+    
+    /**
+     * Judge if this horizontal collision ({@link PlayerMoveData#collideX} or {@link PlayerMoveData#collideZ}) is to be considered as minor.
+     * This is for Minecraft's sprinting reset mechanic.
+     * Prior to 1.21.2, this was set only if the appropriate speed to set was found, therefore, this would return false if the predicted speed is uncertain.
+     * On 1.21.2 and above, this boolean's value is always set.
+     * @see PlayerMoveData#hasImpulse
+     */
+    public boolean negligibleHorizontalCollision;
+    
+    /**
+     * Result of either {@link PlayerMoveData#collideX} or {@link PlayerMoveData#collideZ}.
+     * Prior to 1.21.2, this was set only if the appropriate speed to set was found, therefore, this would return false if the predicted speed is uncertain.
+     * On 1.21.2 and above, this boolean's value is always set.
+     * @see PlayerMoveData#hasImpulse
+     */
+    public boolean collidesHorizontally;
+    
+    
+    @Override
+    protected void resetBase() {
+        // Properties of the player.
+        hasAttackSlowDown = false;
+        edgeBackoffApplied = false;
+        edgeAxisClamped = false;
+        edgeCornerClamp = false;
+        edgeCornerResolved = false;
+        motionX = 0.0;
+        motionY = 0.0;
+        motionZ = 0.0;
+        submergedLavaHeight = 0.0;
+        submergedWaterHeight = 0.0;
+        isGliding = false;
+        forwardImpulse = PlayerKeyboardInput.ForwardDirection.NONE;
+        strafeImpulse = PlayerKeyboardInput.StrafeDirection.NONE;
+        // Properties involving the environment.
+        bunnyHop = false;
+        isStepUp = false;
+        isJump = false;
+        couldStepUp = false;
+        hasClientFromOnGround = false;
+        hasClientToOnGround = false;
+        hasClientToHorizontalCollision = false;
+        // Bounds set by checks.
+        xAllowedDistance = 0.0;
+        yAllowedDistance = 0.0;
+        zAllowedDistance = 0.0;
+        hiddenDistanceIndex = -1;
+        hiddenYDistanceIndex = -1;
+        possibleStopMotion = false;
+        xCorrectedDistancePre = 0.0;
+        yCorrectedDistancePre = 0.0;
+        zCorrectedDistancePre = 0.0;
+        xCorrectedDistancePost = 0.0;
+        zCorrectedDistancePost = 0.0;
+        hAllowedDistance = 0.0;
+        collideX = false;
+        collideY = false;
+        collideZ = false;
+        // Meta stuff.
+        multiMoveCount = 0;
+        verVelUsed.clear();
+        hasNoMovementDueToDuplicatePacket = false;
+        negligibleHorizontalCollision = false;
+        collidesHorizontally = false;
+        hasImpulse = AlmostBoolean.NO;
+        tridentRelease = AlmostBoolean.NO;
+        // Super class last, because it'll set valid to true in the end.
+        super.resetBase();
+    }
+
+}
